@@ -4,16 +4,39 @@ import sys
 import csv, json
 
 import libmft.api
-
+from libmft.flagsandtypes import AttrTypes, FileInfoFlags, MftUsageFlags
 
 #------------------------------------------------------------------------------
 # OUTPUT SECTION
 #------------------------------------------------------------------------------
-def output_csv():
-    pass
+def output_csv(mft, output_file_path):
+    column_order = ["entry_n", "is_deleted", "is_directory", "is_ads", "path",
+                    "size", "alloc_size",
+                    "std_created", "std_changed", "std_mft_change", "std_accessed",
+                    "fn_created", "fn_changed", "fn_mft_change", "fn_accessed",
+                    "readonly", "hidden", "system", "encrypted"]
 
-def output_json():
-    pass
+    with open(output_file_path, "w") as csv_output:
+        writer = csv.DictWriter(csv_output, fieldnames=column_order)
+        writer.writeheader()
+
+        for data in get_mft_entry_info(mft):
+            writer.writerow(data)
+
+def output_json(mft, output_file_path):
+    with open(output_file_path, "w") as json_output:
+        for data in get_mft_entry_info(mft):
+            #TODO configure the output format
+            data["std_created"] = data["std_created"].isoformat()
+            data["std_changed"] = data["std_changed"].isoformat()
+            data["std_mft_change"] = data["std_mft_change"].isoformat()
+            data["std_accessed"] = data["std_accessed"].isoformat()
+            data["fn_created"] = data["fn_created"].isoformat()
+            data["fn_changed"] = data["fn_changed"].isoformat()
+            data["fn_mft_change"] = data["fn_mft_change"].isoformat()
+            data["fn_accessed"] =  data["fn_accessed"].isoformat()
+            
+            json.dump(data, json_output)
 
 #------------------------------------------------------------------------------
 # PROCESSING SECTION
@@ -25,7 +48,6 @@ def get_full_path(mft, fn_attr):
     parent).
 
     If the path is for a deleted entry, the root will be _ORPHAN_.
-
     '''
     names = [fn_attr.content.name] #the first is always the name itself
     root_id = 5 #root id is hardcoded
@@ -48,20 +70,6 @@ def get_full_path(mft, fn_attr):
             break
 
     return "\\".join(reversed(names))
-
-#TODO remove this
-def pretty_print(data):
-    print("--------------------------------")
-    print("path:", data["path"])
-    print("readonly:", data["readonly"], "\thidden:", data["hidden"], "\tsystem:", data["system"], "\tencrypted:", data["encrypted"])
-    print("is_deleted:", data["is_deleted"], "\tis_directory:", data["is_directory"], "\tis_ads:", data["is_ads"])
-    print("entry_n:", data["entry_n"], "\tsize:", data["size"], "\tallocated size:", data["alloc_size"])
-    print("**STD_TIMES**")
-    print("\tcreated:", data["std_created"], "\tchanged:", data["std_changed"])
-    print("\tmft_change:", data["std_mft_change"], "\taccessed:", data["std_accessed"])
-    print("**FN_TIMES**")
-    print("\tcreated:", data["fn_created"], "\tchanged:", data["fn_changed"])
-    print("\tmft_change:", data["fn_mft_change"], "\taccessed:", data["fn_accessed"])
 
 def build_entry_info(mft, entry, std_info, fn_attr, ds):
     data = {}
@@ -93,7 +101,7 @@ def build_entry_info(mft, entry, std_info, fn_attr, ds):
     return data
 
 
-def test_1(mft):
+def get_mft_entry_info(mft):
     default_stream = libmft.api.Datastream() #default empty stream
     fake_time = libmft.util.functions.convert_filetime(0) #default "0" time
     default_filename = libmft.api.Attribute(None, #deafult "empty" FileName attribute
@@ -124,16 +132,16 @@ def test_1(mft):
         #we might have a case where no datastream exists, so set to default
         if ds_names is not None:
             for ds_name in ds_names:
-                pretty_print(build_info_entry(mft, entry, std_info, main_fn, entry.get_datastream(ds_name)))
+                yield build_entry_info(mft, entry, std_info, main_fn, entry.get_datastream(ds_name))
             if None in ds_names:
                 main_ds = entry.get_datastream()
         else:
-            pretty_print(build_info_entry(mft, entry, std_info, main_fn, default_stream))
+            yield build_entry_info(mft, entry, std_info, main_fn, default_stream)
 
         #TODO what happens in case of alternate data stream to a hardlink?
         for fn in fn_attrs:
             if fn.content.parent_ref != main_fn.content.parent_ref: #if it is the same file name (which was printed)
-                pretty_print(build_info_entry(mft, entry, std_info, fn, main_ds))
+                yield build_entry_info(mft, entry, std_info, fn, main_ds)
 
 
 
@@ -172,8 +180,7 @@ def main():
 
     with open(args.input_file_path, "rb") as input_file:
         mft = libmft.api.MFT(input_file, mft_config)
-        for i in mft:
-            print(i)
+        output_json(mft, "teste.csv")
 
 
 if __name__ == '__main__':

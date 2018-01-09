@@ -16,7 +16,10 @@ def output_csv(mft, output_file_path):
                     "fn_created", "fn_changed", "fn_mft_change", "fn_accessed",
                     "readonly", "hidden", "system", "encrypted"]
 
-    with open(output_file_path, "w") as csv_output:
+    #TODO windows messing things? test on linux
+    #TODO https://stackoverflow.com/questions/16271236/python-3-3-csv-writer-writes-extra-blank-rows
+    with open(output_file_path, "w", encoding="utf-8", newline="") as csv_output:
+    #with open(output_file_path, "wb") as csv_output:
         writer = csv.DictWriter(csv_output, fieldnames=column_order)
         writer.writeheader()
 
@@ -35,7 +38,7 @@ def output_json(mft, output_file_path):
             data["fn_changed"] = data["fn_changed"].isoformat()
             data["fn_mft_change"] = data["fn_mft_change"].isoformat()
             data["fn_accessed"] =  data["fn_accessed"].isoformat()
-            
+
             json.dump(data, json_output)
 
 #------------------------------------------------------------------------------
@@ -150,6 +153,7 @@ def get_arguments():
     parser = argparse.ArgumentParser(description="Parses a MFT file.")
     #TODO add output format CSV, JSON, bodyfile
     #TODO option to skip fixup array
+    parser.add_argument("-o", metavar="Output_File", required=True, help="The filename and path where the resulting file will be saved.")
     parser.add_argument("input_file_path", metavar="Input_File", help="The MFT file to be processed.")
 
     return parser.parse_args()
@@ -174,13 +178,15 @@ def main():
         print(f"Path provided '{args.input_file_path}' is not a file or does not exists.", file=sys.stderr)
         sys.exit(1)
 
+    #TODO testing and error handling for output file
+    #TODO selection of output
     #TODO change timezone
     #TODO dump resident files
     #TODO interactive mode?
 
     with open(args.input_file_path, "rb") as input_file:
         mft = libmft.api.MFT(input_file, mft_config)
-        output_json(mft, "teste.csv")
+        output_csv(mft, args.o)
 
 
 if __name__ == '__main__':

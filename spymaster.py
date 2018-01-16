@@ -1,10 +1,23 @@
-import argparse
-import os.path
-import sys
+import argparse, logging
+import os.path, sys
 import csv, json
+import time
+from itertools import chain as _chain
 
 import libmft.api
 from libmft.flagsandtypes import AttrTypes, FileInfoFlags, MftUsageFlags
+
+_MOD_LOGGER = logging.getLogger(__name__)
+
+class BodyFileDialect(csv.Dialect):
+    """To write the bodyfile, we cheat. By defining a new csv dialect, we can
+    offload all the file writing to the csv module.
+    """
+    delimiter = "|"
+    doublequote = False
+    lineterminator = "\n"
+    quotechar = ""
+    quoting = csv.QUOTE_NONE
 
 #------------------------------------------------------------------------------
 # OUTPUT SECTION
@@ -40,6 +53,41 @@ def output_json(mft, output_file_path):
             data["fn_accessed"] =  data["fn_accessed"].isoformat()
 
             json.dump(data, json_output)
+
+def output_bodyfile(mft, output_file_path, use_std_info=True):
+    """Outputs in TSK 3.0+ bodyfile format according to the following format:
+    MD5|name|inode|mode_as_string|UID|GID|size|atime|mtime|ctime|crtime
+    found at: https://wiki.sleuthkit.org/index.php?title=Body_file
+    atime = access time
+    mtime = changed time
+    ctime = mft changed time
+    crtime = createad time
+    """
+    def convert_time(value):
+        '''As unix timestamp exists only after 1970, if we need to convert something
+        that is before that time, we get an error. This internal function avoids it.
+        '''
+        return int(value.timestamp()) if value.year >= 1970 else 0
+
+    #TODO windows messing things? test on linux
+    #TODO https://stackoverflow.com/questions/16271236/python-3-3-csv-writer-writes-extra-blank-rows
+    with open(output_file_path, "w", encoding="utf-8") as csv_output:
+        writer = csv.writer(csv_output, dialect=BodyFileDialect)
+
+        for data in get_mft_entry_info(mft):
+            temp = [0, data["path"], data["entry_n"], 0, 0, 0, data["size"]]
+            if use_std_info:
+                dates = [int(data["std_accessed"].timestamp()),
+                         int(data["std_changed"].timestamp()),
+                         int(data["std_mft_change"].timestamp()),
+                         int(data["std_created"].timestamp())]
+            else:
+                dates = [convert_time(data["fn_accessed"]),
+                         convert_time(data["fn_changed"]),
+                         convert_time(data["fn_mft_change"]),
+                         convert_time(data["fn_created"])]
+            writer.writerow(_chain(temp, dates))
+
 
 #------------------------------------------------------------------------------
 # PROCESSING SECTION
@@ -111,7 +159,7 @@ def get_mft_entry_info(mft):
         libmft.attrcontent.FileName((5, mft[5].header.seq_number,
             fake_time, fake_time, fake_time, fake_time,
             libmft.flagsandtypes.FileInfoFlags(0), -1, 0,
-            libmft.flagsandtypes.NameType.POSIX, "INVALID")))
+            libmft.flagsandtypes.NameType.POSIX, "__INVALID__")))
 
     for entry in mft:
         #sometimes entries have no attributes and are marked as deleted, there is no information there
@@ -151,8 +199,11 @@ def get_mft_entry_info(mft):
 
 def get_arguments():
     parser = argparse.ArgumentParser(description="Parses a MFT file.")
+    formats = ["csv", "json", "bodyfile"]
     #TODO add output format CSV, JSON, bodyfile
     #TODO option to skip fixup array
+    parser.add_argument("-f", metavar="Output format", default="csv", choices=formats, help="Format of the output file.")
+    parser.add_argument("--fn", action="store_false", help="Specifies if the bodyfile format will use the FILE_NAME attribute for the dates. Valid only for bodyfile output.")
     parser.add_argument("-o", metavar="Output_File", required=True, help="The filename and path where the resulting file will be saved.")
     parser.add_argument("input_file_path", metavar="Input_File", help="The MFT file to be processed.")
 
@@ -178,15 +229,26 @@ def main():
         print(f"Path provided '{args.input_file_path}' is not a file or does not exists.", file=sys.stderr)
         sys.exit(1)
 
-    #TODO testing and error handling for output file
-    #TODO selection of output
+    if os.path.exists(args.o):
+        _MOD_LOGGER.warning(f"The output file '{args.o}' exists and will be overwritten. You have 5 seconds to cancel the execution (CTRL+C).")
+        time.sleep(5)
+        
+    #TODO
     #TODO change timezone
     #TODO dump resident files
     #TODO interactive mode?
 
     with open(args.input_file_path, "rb") as input_file:
         mft = libmft.api.MFT(input_file, mft_config)
-        output_csv(mft, args.o)
+        if args.f == "csv":
+            output_csv(mft, args.o)
+        elif args.f == "json":
+            output_json(mft, args.o)
+        elif args.f == "bodyfile":
+            output_bodyfile(mft, args.o, args.fn)
+        else:
+            print("SOMETHING IS VERY WRONG")
+
 
 
 if __name__ == '__main__':

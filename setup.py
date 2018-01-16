@@ -3,7 +3,7 @@ from setuptools import setup
 
 setup(
     name = "spymaster",
-    version = "0.1",
+    version = "0.2",
     author = "Julio Dantas",
     description = "A pure python MFT parser",
     url = "https://github.com/jldantas/spymaster",

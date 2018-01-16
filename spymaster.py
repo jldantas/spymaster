@@ -6,8 +6,13 @@ from itertools import chain as _chain
 
 import libmft.api
 from libmft.flagsandtypes import AttrTypes, FileInfoFlags, MftUsageFlags
+from libmft.exceptions import DataStreamError
 
 _MOD_LOGGER = logging.getLogger(__name__)
+
+class SpymasterError(Exception):
+    """ 'Generic' error class for the script"""
+    pass
 
 class BodyFileDialect(csv.Dialect):
     """To write the bodyfile, we cheat. By defining a new csv dialect, we can
@@ -54,7 +59,7 @@ def output_json(mft, output_file_path):
 
             json.dump(data, json_output)
 
-def output_bodyfile(mft, output_file_path, use_std_info=True):
+def output_bodyfile(mft, output_file_path, use_fn_info):
     """Outputs in TSK 3.0+ bodyfile format according to the following format:
     MD5|name|inode|mode_as_string|UID|GID|size|atime|mtime|ctime|crtime
     found at: https://wiki.sleuthkit.org/index.php?title=Body_file
@@ -76,16 +81,17 @@ def output_bodyfile(mft, output_file_path, use_std_info=True):
 
         for data in get_mft_entry_info(mft):
             temp = [0, data["path"], data["entry_n"], 0, 0, 0, data["size"]]
-            if use_std_info:
-                dates = [int(data["std_accessed"].timestamp()),
-                         int(data["std_changed"].timestamp()),
-                         int(data["std_mft_change"].timestamp()),
-                         int(data["std_created"].timestamp())]
-            else:
+            if use_fn_info:
                 dates = [convert_time(data["fn_accessed"]),
                          convert_time(data["fn_changed"]),
                          convert_time(data["fn_mft_change"]),
                          convert_time(data["fn_created"])]
+            else:
+                dates = [int(data["std_accessed"].timestamp()),
+                         int(data["std_changed"].timestamp()),
+                         int(data["std_mft_change"].timestamp()),
+                         int(data["std_created"].timestamp())]
+
             writer.writerow(_chain(temp, dates))
 
 
@@ -194,22 +200,40 @@ def get_mft_entry_info(mft):
             if fn.content.parent_ref != main_fn.content.parent_ref: #if it is the same file name (which was printed)
                 yield build_entry_info(mft, entry, std_info, fn, main_ds)
 
+def dump_resident_file(mft, output_file_path, entry_number):
+    datastream = mft[entry_number].get_datastream()
 
-
+    try:
+        content = datastream.get_content()
+        with open(output_file_path, "wb") as file_output:
+            file_output.write(content)
+    except DataStreamError as e:
+        raise SpymasterError(f"Entry {entry_number} is not resident. Can't be dumped.")
 
 def get_arguments():
     parser = argparse.ArgumentParser(description="Parses a MFT file.")
     formats = ["csv", "json", "bodyfile"]
+
     #TODO add output format CSV, JSON, bodyfile
     #TODO option to skip fixup array
-    parser.add_argument("-f", metavar="Output format", default="csv", choices=formats, help="Format of the output file.")
-    parser.add_argument("--fn", action="store_false", help="Specifies if the bodyfile format will use the FILE_NAME attribute for the dates. Valid only for bodyfile output.")
-    parser.add_argument("-o", metavar="Output_File", required=True, help="The filename and path where the resulting file will be saved.")
-    parser.add_argument("input_file_path", metavar="Input_File", help="The MFT file to be processed.")
+    parser.add_argument("-f", "--format", dest="format", metavar="<format>", default="csv", choices=formats, help="Format of the output file.")
+    parser.add_argument("--fn", dest="use_fn", action="store_true", help="Specifies if the bodyfile format will use the FILE_NAME attribute for the dates. Valid only for bodyfile output.")
+    parser.add_argument("-d", "--dump", dest="dump_entry", metavar="<entry number>", type=int, help="Dumps resident files from the MFT. Pass the entry number to dump the file. The name of the file needs to be specified using the '-o' option.")
+    parser.add_argument("-o", "--output", dest="output", metavar="<output file>", required=True, help="The filename and path where the resulting file will be saved.")
+    parser.add_argument("-i", "--input", dest="input", metavar="<input file>", required=True, help="The MFT file to be processed.")
 
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    #TODO mutually exclude -f and -d
+
+    if args.use_fn and args.format != "bodyfile":
+        parser.error("Argument '--fn' can only be used with 'bodyfile' format.")
+
+    return args
 
 def main():
+    _MOD_LOGGER.setLevel(level=logging.INFO)
+    _MOD_LOGGER.addHandler(logging.StreamHandler(sys.stderr))
     args = get_arguments()
 
     mft_config = libmft.api.MFTConfig()
@@ -225,29 +249,37 @@ def main():
     mft_config.load_log_tool_str = False
     mft_config.load_attr_list = False
 
-    if not os.path.isfile(args.input_file_path):
-        print(f"Path provided '{args.input_file_path}' is not a file or does not exists.", file=sys.stderr)
+    if not os.path.isfile(args.input):
+        _MOD_LOGGER.error(f"Path provided '{args.input}' is not a file or does not exists.")
         sys.exit(1)
 
-    if os.path.exists(args.o):
-        _MOD_LOGGER.warning(f"The output file '{args.o}' exists and will be overwritten. You have 5 seconds to cancel the execution (CTRL+C).")
+    if os.path.exists(args.output):
+        _MOD_LOGGER.warning(f"The output file '{args.output}' exists and will be overwritten. You have 5 seconds to cancel the execution (CTRL+C).")
         time.sleep(5)
-        
+
     #TODO
-    #TODO change timezone
-    #TODO dump resident files
+    #TODO change timezones (use python-dateutil, https://dateutil.readthedocs.io/en/stable/index.html)
+    #TODO dump all resident files
     #TODO interactive mode?
 
-    with open(args.input_file_path, "rb") as input_file:
+    with open(args.input, "rb") as input_file:
         mft = libmft.api.MFT(input_file, mft_config)
-        if args.f == "csv":
-            output_csv(mft, args.o)
-        elif args.f == "json":
-            output_json(mft, args.o)
-        elif args.f == "bodyfile":
-            output_bodyfile(mft, args.o, args.fn)
+        if args.dump_entry is None:
+            if args.format == "csv":
+                output_csv(mft, args.output)
+            elif args.format == "json":
+                output_json(mft, args.output)
+            elif args.format == "bodyfile":
+                output_bodyfile(mft, args.output, args.use_fn)
+            else:
+                _MOD_LOGGER.error(f"An invalid format option was passed (bypassed -f check). SOMETHING WENT TO HELL.")
+                sys.exit(2)
         else:
-            print("SOMETHING IS VERY WRONG")
+            _MOD_LOGGER.info(f"Dumping entry '{args.dump_entry}' to file '{args.output}'.")
+            try:
+                dump_resident_file(mft, args.output, args.dump_entry)
+            except SpymasterError as e:
+                _MOD_LOGGER.error(str(e))
 
 
 

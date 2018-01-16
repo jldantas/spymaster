@@ -34,6 +34,8 @@ TODO
 
 - Added csv, json and bodyfile
 - Can select if bodyfile will use FILENAME attribute or STANDARD_INFORMATION
+- Changed input to option "-i"
+- Added option to dump resident files
 
 ### Version 0.1
 

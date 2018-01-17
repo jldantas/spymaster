@@ -21,7 +21,7 @@ setup(
          "Topic :: System :: Filesystems"
     ],
     keywords = "mft parser python",
-    install_requires=['libmft'],
+    install_requires=['libmft', 'python-dateutil'],
     python_requires = ">=3.6",
     #packages = find_packages(exclude=['contrib', 'docs', 'tests*']),
     scripts = ["spymaster.py"]

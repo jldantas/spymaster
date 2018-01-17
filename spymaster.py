@@ -8,6 +8,9 @@ import libmft.api
 from libmft.flagsandtypes import AttrTypes, FileInfoFlags, MftUsageFlags
 from libmft.exceptions import DataStreamError
 
+import dateutil #https://dateutil.readthedocs.io/en/stable/index.html
+import dateutil.zoneinfo
+
 _MOD_LOGGER = logging.getLogger(__name__)
 
 class SpymasterError(Exception):
@@ -27,7 +30,7 @@ class BodyFileDialect(csv.Dialect):
 #------------------------------------------------------------------------------
 # OUTPUT SECTION
 #------------------------------------------------------------------------------
-def output_csv(mft, output_file_path):
+def output_csv(mft, args):
     column_order = ["entry_n", "is_deleted", "is_directory", "is_ads", "path",
                     "size", "alloc_size",
                     "std_created", "std_changed", "std_mft_change", "std_accessed",
@@ -36,18 +39,17 @@ def output_csv(mft, output_file_path):
 
     #TODO windows messing things? test on linux
     #TODO https://stackoverflow.com/questions/16271236/python-3-3-csv-writer-writes-extra-blank-rows
-    with open(output_file_path, "w", encoding="utf-8", newline="") as csv_output:
-    #with open(output_file_path, "wb") as csv_output:
+    with open(args.output, "w", encoding="utf-8", newline="") as csv_output:
         writer = csv.DictWriter(csv_output, fieldnames=column_order)
         writer.writeheader()
 
-        for data in get_mft_entry_info(mft):
+        for data in get_mft_entry_info(mft, args):
+            #format_time(data, timezone)
             writer.writerow(data)
 
-def output_json(mft, output_file_path):
-    with open(output_file_path, "w") as json_output:
-        for data in get_mft_entry_info(mft):
-            #TODO configure the output format
+def output_json(mft, args):
+    with open(args.output, "w") as json_output:
+        for data in get_mft_entry_info(mft, args):
             data["std_created"] = data["std_created"].isoformat()
             data["std_changed"] = data["std_changed"].isoformat()
             data["std_mft_change"] = data["std_mft_change"].isoformat()
@@ -59,7 +61,7 @@ def output_json(mft, output_file_path):
 
             json.dump(data, json_output)
 
-def output_bodyfile(mft, output_file_path, use_fn_info):
+def output_bodyfile(mft, args):
     """Outputs in TSK 3.0+ bodyfile format according to the following format:
     MD5|name|inode|mode_as_string|UID|GID|size|atime|mtime|ctime|crtime
     found at: https://wiki.sleuthkit.org/index.php?title=Body_file
@@ -69,17 +71,17 @@ def output_bodyfile(mft, output_file_path, use_fn_info):
     crtime = createad time
     """
     def convert_time(value):
-        '''As unix timestamp exists only after 1970, if we need to convert something
+        '''An unix timestamp exists only after 1970, if we need to convert something
         that is before that time, we get an error. This internal function avoids it.
         '''
         return int(value.timestamp()) if value.year >= 1970 else 0
 
     #TODO windows messing things? test on linux
     #TODO https://stackoverflow.com/questions/16271236/python-3-3-csv-writer-writes-extra-blank-rows
-    with open(output_file_path, "w", encoding="utf-8") as csv_output:
+    with open(args.output, "w", encoding="utf-8") as csv_output:
         writer = csv.writer(csv_output, dialect=BodyFileDialect)
 
-        for data in get_mft_entry_info(mft):
+        for data in get_mft_entry_info(mft, args):
             temp = [0, data["path"], data["entry_n"], 0, 0, 0, data["size"]]
             if use_fn_info:
                 dates = [convert_time(data["fn_accessed"]),
@@ -128,19 +130,19 @@ def get_full_path(mft, fn_attr):
 
     return "\\".join(reversed(names))
 
-def build_entry_info(mft, entry, std_info, fn_attr, ds):
+def build_entry_info(mft, entry, std_info, fn_attr, ds, timezone):
     data = {}
     data["is_deleted"] = entry.is_deleted()
     data["is_directory"] = entry.is_directory()
     data["entry_n"] = entry.header.mft_record
-    data["std_created"] = std_info.content.get_created_time()
-    data["std_changed"] = std_info.content.get_changed_time()
-    data["std_mft_change"] = std_info.content.get_mftchange_time()
-    data["std_accessed"] = std_info.content.get_accessed_time()
-    data["fn_created"] = fn_attr.content.get_created_time()
-    data["fn_changed"] = fn_attr.content.get_changed_time()
-    data["fn_mft_change"] = fn_attr.content.get_mftchange_time()
-    data["fn_accessed"] = fn_attr.content.get_accessed_time()
+    data["std_created"] = std_info.content.get_created_time().astimezone(timezone)
+    data["std_changed"] = std_info.content.get_changed_time().astimezone(timezone)
+    data["std_mft_change"] = std_info.content.get_mftchange_time().astimezone(timezone)
+    data["std_accessed"] = std_info.content.get_accessed_time().astimezone(timezone)
+    data["fn_created"] = fn_attr.content.get_created_time().astimezone(timezone)
+    data["fn_changed"] = fn_attr.content.get_changed_time().astimezone(timezone)
+    data["fn_mft_change"] = fn_attr.content.get_mftchange_time().astimezone(timezone)
+    data["fn_accessed"] = fn_attr.content.get_accessed_time().astimezone(timezone)
     if ds.name is None:
         data["path"] = get_full_path(mft, fn_attr)
         data["is_ads"] = False
@@ -158,7 +160,7 @@ def build_entry_info(mft, entry, std_info, fn_attr, ds):
     return data
 
 
-def get_mft_entry_info(mft):
+def get_mft_entry_info(mft, args):
     default_stream = libmft.api.Datastream() #default empty stream
     fake_time = libmft.util.functions.convert_filetime(0) #default "0" time
     default_filename = libmft.api.Attribute(None, #deafult "empty" FileName attribute
@@ -189,16 +191,16 @@ def get_mft_entry_info(mft):
         #we might have a case where no datastream exists, so set to default
         if ds_names is not None:
             for ds_name in ds_names:
-                yield build_entry_info(mft, entry, std_info, main_fn, entry.get_datastream(ds_name))
+                yield build_entry_info(mft, entry, std_info, main_fn, entry.get_datastream(ds_name), args.timezone)
             if None in ds_names:
                 main_ds = entry.get_datastream()
         else:
-            yield build_entry_info(mft, entry, std_info, main_fn, default_stream)
+            yield build_entry_info(mft, entry, std_info, main_fn, default_stream, args.timezone)
 
         #TODO what happens in case of alternate data stream to a hardlink?
         for fn in fn_attrs:
             if fn.content.parent_ref != main_fn.content.parent_ref: #if it is the same file name (which was printed)
-                yield build_entry_info(mft, entry, std_info, fn, main_ds)
+                yield build_entry_info(mft, entry, std_info, fn, main_ds, args.timezone)
 
 def dump_resident_file(mft, output_file_path, entry_number):
     datastream = mft[entry_number].get_datastream()
@@ -210,26 +212,63 @@ def dump_resident_file(mft, output_file_path, entry_number):
     except DataStreamError as e:
         raise SpymasterError(f"Entry {entry_number} is not resident. Can't be dumped.")
 
+'''
+Input -> load -> correction -> output
+
+output needs iterator/generator, arguments (output)
+'''
+
+#------------------------------------------------------------------------------
+# CLI SECTION
+#------------------------------------------------------------------------------
 def get_arguments():
+    '''Defines the arguments for the program and do all the necessary checks related
+    to the options.
+    '''
     parser = argparse.ArgumentParser(description="Parses a MFT file.")
     formats = ["csv", "json", "bodyfile"]
 
-    #TODO add output format CSV, JSON, bodyfile    
     parser.add_argument("-f", "--format", dest="format", metavar="<format>", default="csv", choices=formats, help="Format of the output file.")
     parser.add_argument("--fn", dest="use_fn", action="store_true", help="Specifies if the bodyfile format will use the FILE_NAME attribute for the dates. Valid only for bodyfile output.")
     parser.add_argument("-d", "--dump", dest="dump_entry", metavar="<entry number>", type=int, help="Dumps resident files from the MFT. Pass the entry number to dump the file. The name of the file needs to be specified using the '-o' option.")
     parser.add_argument("--disable-fixup", dest="disable_fixup", action="store_false", help="Disable the application of the fixup array. Should be used only when trying to get MFT entries from memory.")
-    parser.add_argument("-o", "--output", dest="output", metavar="<output file>", required=True, help="The filename and path where the resulting file will be saved.")
-    parser.add_argument("-i", "--input", dest="input", metavar="<input file>", required=True, help="The MFT file to be processed.")
+    parser.add_argument("-t", "--timezone", dest="timezone", metavar="<timezone name>", default="UTC", help="Convert all the times used by the script to the provided timezone. Use '--list-tz' to check available timezones. Default is UTC.")
+    parser.add_argument("--list-tz", dest="show_tz", action="store_true", help="Prints a list of all available timezones.")
+    parser.add_argument("-o", "--output", dest="output", metavar="<output file>", required=False, help="The filename and path where the resulting file will be saved.")
+    parser.add_argument("-i", "--input", dest="input", metavar="<input file>", required=False, help="The MFT file to be processed.")
 
     args = parser.parse_args()
 
     #TODO mutually exclude -f and -d
 
+    #can only use the --fn option with the bodyfile format
     if args.use_fn and args.format != "bodyfile":
         parser.error("Argument '--fn' can only be used with 'bodyfile' format.")
 
     return args
+
+def print_timezones():
+    zone_names = list(dateutil.zoneinfo.get_zonefile_instance().zones)
+    zone_names.sort()
+    zone_iter = iter(zone_names)
+    column_number = 3
+
+    names_matrix = [[]]
+    i = 0
+    for name in zone_names:
+        if i == column_number:
+            names_matrix.append([])
+            i = 0
+        names_matrix[-1].append(name)
+        i += 1
+    #if the last line has less than number of columns, add the missing ones
+    fix = column_number - len(names_matrix[-1])
+    for i in range(fix):
+        names_matrix[-1].append("-")
+
+    for names in names_matrix:
+        print("{0:32}{0:32}{0:32}".format(names[0], names[1], names[2]))
+
 
 def main():
     _MOD_LOGGER.setLevel(level=logging.INFO)
@@ -250,6 +289,11 @@ def main():
     mft_config.load_attr_list = False
     mft_config.apply_fixup_array = args.disable_fixup
 
+    if args.show_tz:
+        print_timezones()
+        sys.exit(0)
+    args.timezone = dateutil.tz.gettz(args.timezone)
+
     if not os.path.isfile(args.input):
         _MOD_LOGGER.error(f"Path provided '{args.input}' is not a file or does not exists.")
         sys.exit(1)
@@ -258,20 +302,21 @@ def main():
         _MOD_LOGGER.warning(f"The output file '{args.output}' exists and will be overwritten. You have 5 seconds to cancel the execution (CTRL+C).")
         time.sleep(5)
 
-    #TODO
-    #TODO change timezones (use python-dateutil, https://dateutil.readthedocs.io/en/stable/index.html)
+    #TODO format time output
+    #TODO some kind of progress bar
     #TODO dump all resident files
+    #TODO some kind of "anomaly" detection?
     #TODO interactive mode?
 
     with open(args.input, "rb") as input_file:
         mft = libmft.api.MFT(input_file, mft_config)
         if args.dump_entry is None:
             if args.format == "csv":
-                output_csv(mft, args.output)
+                output_csv(mft, args)
             elif args.format == "json":
-                output_json(mft, args.output)
+                output_json(mft, args)
             elif args.format == "bodyfile":
-                output_bodyfile(mft, args.output, args.use_fn)
+                output_bodyfile(mft, args)
             else:
                 _MOD_LOGGER.error(f"An invalid format option was passed (bypassed -f check). SOMETHING WENT TO HELL.")
                 sys.exit(2)

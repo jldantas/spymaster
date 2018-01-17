@@ -214,11 +214,11 @@ def get_arguments():
     parser = argparse.ArgumentParser(description="Parses a MFT file.")
     formats = ["csv", "json", "bodyfile"]
 
-    #TODO add output format CSV, JSON, bodyfile
-    #TODO option to skip fixup array
+    #TODO add output format CSV, JSON, bodyfile    
     parser.add_argument("-f", "--format", dest="format", metavar="<format>", default="csv", choices=formats, help="Format of the output file.")
     parser.add_argument("--fn", dest="use_fn", action="store_true", help="Specifies if the bodyfile format will use the FILE_NAME attribute for the dates. Valid only for bodyfile output.")
     parser.add_argument("-d", "--dump", dest="dump_entry", metavar="<entry number>", type=int, help="Dumps resident files from the MFT. Pass the entry number to dump the file. The name of the file needs to be specified using the '-o' option.")
+    parser.add_argument("--disable-fixup", dest="disable_fixup", action="store_false", help="Disable the application of the fixup array. Should be used only when trying to get MFT entries from memory.")
     parser.add_argument("-o", "--output", dest="output", metavar="<output file>", required=True, help="The filename and path where the resulting file will be saved.")
     parser.add_argument("-i", "--input", dest="input", metavar="<input file>", required=True, help="The MFT file to be processed.")
 
@@ -248,6 +248,7 @@ def main():
     mft_config.load_ea = False
     mft_config.load_log_tool_str = False
     mft_config.load_attr_list = False
+    mft_config.apply_fixup_array = args.disable_fixup
 
     if not os.path.isfile(args.input):
         _MOD_LOGGER.error(f"Path provided '{args.input}' is not a file or does not exists.")

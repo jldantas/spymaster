@@ -4,11 +4,10 @@ import argparse
 import logging
 import time
 import csv
-import json
-import time
 import multiprocessing as mp
 import shutil
 from itertools import chain as _chain
+from json import dump as _json_dump
 
 import libmft.api
 from libmft.flagsandtypes import AttrTypes, FileInfoFlags, MftUsageFlags
@@ -29,6 +28,82 @@ class SpymasterError(Exception):
     """ 'Generic' error class for the script"""
     pass
 
+#------------------------------------------------------------------------------
+# OUTPUT SECTION
+#------------------------------------------------------------------------------
+class OutputCSV():
+    """Controls file output when the csv format is selected.
+    """
+    def __init__(self, filename, args):
+        self.filename = filename
+        self.fp = None
+        self.writer = None
+        self.time_format = args.time_format
+
+    def _adjust_data(self, single_data):
+        if single_data["std_created"]:
+            single_data["std_created"] = single_data["std_created"].strftime(self.time_format)
+            single_data["std_changed"] = single_data["std_changed"].strftime(self.time_format)
+            single_data["std_mft_change"] = single_data["std_mft_change"].strftime(self.time_format)
+            single_data["std_accessed"] = single_data["std_accessed"].strftime(self.time_format)
+        if single_data["fn_created"]:
+            single_data["fn_created"] = single_data["fn_created"].strftime(self.time_format)
+            single_data["fn_changed"] = single_data["fn_changed"].strftime(self.time_format)
+            single_data["fn_mft_change"] = single_data["fn_mft_change"].strftime(self.time_format)
+            single_data["fn_accessed"] = single_data["fn_accessed"].strftime(self.time_format)
+
+    def write_data(self, data):
+        self._adjust_data(data)
+        self.writer.writerows(self._buffer)
+
+    def execute_pre_merge(self):
+        self.writer.writeheader()
+
+    def __enter__(self):
+        self.fp = open(self.filename, "w", encoding="utf-8", newline="")
+        self.writer = csv.DictWriter(self.fp, fieldnames=_CSV_COLUMN_ORDER)
+
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.writer = None
+        self.fp.close()
+
+class OutputJSON():
+    """Controls file output when the json format is selected.
+    """
+    def __init__(self, filename, args):
+        self.filename = filename
+        self.fp = None
+        self.time_format = args.time_format
+
+    def _adjust_data(self, single_data):
+        if single_data["std_created"]:
+            single_data["std_created"] = single_data["std_created"].strftime(self.time_format)
+            single_data["std_changed"] = single_data["std_changed"].strftime(self.time_format)
+            single_data["std_mft_change"] = single_data["std_mft_change"].strftime(self.time_format)
+            single_data["std_accessed"] = single_data["std_accessed"].strftime(self.time_format)
+        if single_data["fn_created"]:
+            single_data["fn_created"] = single_data["fn_created"].strftime(self.time_format)
+            single_data["fn_changed"] = single_data["fn_changed"].strftime(self.time_format)
+            single_data["fn_mft_change"] = single_data["fn_mft_change"].strftime(self.time_format)
+            single_data["fn_accessed"] = single_data["fn_accessed"].strftime(self.time_format)
+
+    def write_data(self, data):
+        self._adjust_data(data)
+        _json_dump(data, self.fp)
+
+    def execute_pre_merge(self):
+        pass
+
+    def __enter__(self):
+        self.fp = open(self.filename, "w")
+
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.fp.close()
+
 class BodyFileDialect(csv.Dialect):
     """To write the bodyfile, we cheat. By defining a new csv dialect, we can
     offload all the file writing to the csv module.
@@ -39,37 +114,10 @@ class BodyFileDialect(csv.Dialect):
     quotechar = ""
     quoting = csv.QUOTE_NONE
 
-#------------------------------------------------------------------------------
-# OUTPUT SECTION
-#------------------------------------------------------------------------------
-def output_csv(mft, args, temp_filename, start_point, end_point):
-    global _CSV_COLUMN_ORDER
+class OutputBodyFile():
+    """Controls file output when the bodyfile format is selected.
 
-    #TODO windows messing things? test on linux
-    #TODO https://stackoverflow.com/questions/16271236/python-3-3-csv-writer-writes-extra-blank-rows
-    with open(temp_filename, "w", encoding="utf-8", newline="") as csv_output:
-        writer = csv.DictWriter(csv_output, fieldnames=_CSV_COLUMN_ORDER)
-
-        i = 0
-        buf_size = 8192
-        buffer = [None] * buf_size
-        for data in get_mft_entry_info(mft, args, start_point, end_point):
-            print(data)
-            buffer[i] = data
-            i += 1
-            if i == buf_size:
-                writer.writerows(buffer)
-                i = 0
-        if buffer:
-            writer.writerows(buffer)
-
-def output_json(mft, args, temp_filename, start_point, end_point):
-    with open(temp_filename, "w") as json_output:
-        for data in get_mft_entry_info(mft, args, start_point, end_point):
-            json.dump(data, json_output)
-
-def output_bodyfile(mft, temp_filename, start_point, end_point):
-    """Outputs in TSK 3.0+ bodyfile format according to the following format:
+    Outputs in TSK 3.0+ bodyfile format according to the following format:
     MD5|name|inode|mode_as_string|UID|GID|size|atime|mtime|ctime|crtime
     found at: https://wiki.sleuthkit.org/index.php?title=Body_file
     atime = access time
@@ -77,142 +125,56 @@ def output_bodyfile(mft, temp_filename, start_point, end_point):
     ctime = mft changed time
     crtime = createad time
     """
-    def convert_time(value):
-        '''An unix timestamp exists only after 1970, if we need to convert something
-        that is before that time, we get an error. This internal function avoids it.
-        '''
-        return int(value.timestamp()) if value.year >= 1970 else 0
 
-    with open(args.output, "w", encoding="utf-8") as csv_output:
-        writer = csv.writer(csv_output, dialect=BodyFileDialect)
+    def __init__(self, filename, args):
+        self.filename = filename
+        self.fp = None
+        self.writer = None
+        self.use_fn = args.use_fn
 
-        for data in get_mft_entry_info(mft, args, start_point, end_point):
-            temp = [0, data["path"], data["entry_n"], 0, 0, 0, data["size"]]
-            if use_fn_info:
+    def _get_converted_time(self, data):
+        def convert_time(value):
+            '''An unix timestamp exists only after 1970, if we need to convert something
+            that is before that time, we get an error. This internal function avoids it.
+            '''
+            return int(value.timestamp()) if value.year >= 1970 else ""
+
+        if self.use_fn:
+            if data["fn_created"]:
                 dates = [convert_time(data["fn_accessed"]),
                          convert_time(data["fn_changed"]),
                          convert_time(data["fn_mft_change"]),
                          convert_time(data["fn_created"])]
             else:
+                dates = ["", "", "", ""]
+        else:
+            if data["std_created"]:
                 dates = [convert_time(data["std_accessed"]),
                          convert_time(data["std_changed"]),
                          convert_time(data["std_mft_change"]),
                          convert_time(data["std_created"])]
+            else:
+                dates = ["", "", "", ""]
 
-            writer.writerow(_chain(temp, dates))
+        return dates
 
+    def write_data(self, data):
+        temp = [0, data["path"], data["entry_n"], 0, 0, 0, data["size"]]
+        dates = self._get_converted_time(data)
+        self.writer.writerow(_chain(temp, dates))
 
-#------------------------------------------------------------------------------
-# PROCESSING SECTION
-#------------------------------------------------------------------------------
+    def execute_pre_merge(self):
+        pass
 
-def build_output_dict(mft, entry, std_info, fn, ds, timezone, time_format="%Y-%m-%d %H:%M:%S"):
-    data = {}
-    data["is_deleted"] = entry.is_deleted
-    data["is_directory"] = entry.is_directory
-    data["entry_n"] = entry.header.mft_record
+    def __enter__(self):
+        self.fp = open(self.filename, "w", encoding="utf-8")
+        self.writer = csv.writer(self.fp, dialect=BodyFileDialect)
 
-    if std_info is not None:
-        std_info_content = std_info.content
-        std_info_ti = std_info_content.timestamps.astimezone(timezone)
-        data["std_created"] = std_info_ti.created.strftime(time_format)
-        data["std_changed"] = std_info_ti.changed.strftime(time_format)
-        data["std_mft_change"] = std_info_ti.mft_changed.strftime(time_format)
-        data["std_accessed"] = std_info_ti.accessed.strftime(time_format)
-    else:
-        data["std_created"] = data["std_changed"] = data["std_mft_change"] = \
-            data["std_accessed"] = ""
+        return self
 
-    if fn is not None:
-        fn_content = fn.content
-        fn_ti = fn_content.timestamps.astimezone(timezone)
-        data["fn_created"] = fn_ti.created.strftime(time_format)
-        data["fn_changed"] = fn_ti.changed.strftime(time_format)
-        data["fn_mft_change"] = fn_ti.mft_changed.strftime(time_format)
-        data["fn_accessed"] = fn_ti.accessed.strftime(time_format)
-    else:
-        data["fn_created"] = data["fn_changed"] = data["fn_mft_change"] = \
-            data["fn_accessed"] = ""
-
-    if fn is not None:
-        if ds is None or ds.name is None:
-            orphan, data["path"] = mft.get_full_path(fn)
-            data["is_ads"] = False
-        else:
-            orphan, data["path"] = mft.get_full_path(fn)
-            data["path"] = ":".join((data["path"], ds.name))
-            data["is_ads"] = True
-    else:
-        orphan = False
-        data["path"] = ""
-        data["is_ads"] = False
-
-    if orphan:
-        data["path"] = "__ORPHAN__" + "\\" + data["path"]
-
-    if ds is not None:
-        data["size"] = ds.size
-        data["alloc_size"] = ds.alloc_size
-    else:
-        data["size"] = data["alloc_size"] = "0"
-
-    data["readonly"] = True if std_info_content.flags & libmft.flagsandtypes.FileInfoFlags.READ_ONLY else False
-    data["hidden"] = True if std_info_content.flags & libmft.flagsandtypes.FileInfoFlags.HIDDEN else False
-    data["system"] = True if std_info_content.flags & libmft.flagsandtypes.FileInfoFlags.SYSTEM else False
-    data["encrypted"] = True if std_info_content.flags & libmft.flagsandtypes.FileInfoFlags.ENCRYPTED else False
-
-    return data
-
-def get_mft_entry_info(mft, args, start_point, end_point):
-    for entry in mft.splice_generator(start_point, end_point):
-        #sometimes entries have no attributes and are marked as deleted, there is no information there
-        if not entry.attrs and entry.is_deleted:
-            continue
-        #other times, we might have a partial entry (entry that has been deleted,
-        #but occupied more than one entry) and not have the basic attribute information
-        #like STANDARD_INFORMATION or FILENAME, in these cases, ignore as well
-        if not entry.is_deleted and not entry.has_attribute(AttrTypes.STANDARD_INFORMATION):
-            continue
-
-        std_info = entry.get_attributes(AttrTypes.STANDARD_INFORMATION)[0]
-        fn_attrs = entry.get_unique_filename_attrs()
-        main_fn = entry.get_main_filename_attr()
-        ds_names = entry.get_datastream_names()
-        main_ds = None
-
-        if not fn_attrs:
-            fn_attrs = [None]
-            main_fn = None
-
-        if ds_names is not None:
-            for ds_name in ds_names:
-                yield build_output_dict(mft, entry, std_info, main_fn, entry.get_datastream(ds_name), args.timezone, args.time_format)
-            if None in ds_names:
-                main_ds = entry.get_datastream()
-        else:
-            yield build_output_dict(mft, entry, std_info, main_fn, main_ds, args.timezone, args.time_format)
-
-        if main_fn:
-            for fn in fn_attrs:
-                if fn.content.parent_ref != main_fn.content.parent_ref: #if it is the same file name (which was printed)
-                    yield build_output_dict(mft, entry, std_info, fn, main_ds, args.timezone, args.time_format)
-
-
-def dump_resident_file(mft, output_file_path, entry_number):
-    datastream = mft[entry_number].get_datastream()
-
-    try:
-        content = datastream.get_content()
-        with open(output_file_path, "wb") as file_output:
-            file_output.write(content)
-    except DataStreamError as e:
-        raise SpymasterError(f"Entry {entry_number} is not resident. Can't be dumped.")
-
-'''
-Input -> load -> correction -> output
-
-output needs iterator/generator, arguments (output)
-'''
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.writer = None
+        self.fp.close()
 
 #------------------------------------------------------------------------------
 # CLI SECTION
@@ -277,7 +239,120 @@ def print_timezones():
         print("{0:32}{0:32}{0:32}".format(names[0], names[1], names[2]))
 
 #------------------------------------------------------------------------------
-# PARALLEL SECTION
+# PROCESSING SECTION
+#------------------------------------------------------------------------------
+def build_data_output(mft, entry, std_info, fn, ds, args):
+    data = {}
+    #get entry related information
+    data["is_deleted"] = entry.is_deleted
+    data["is_directory"] = entry.is_directory
+    data["entry_n"] = entry.header.mft_record
+
+    #get STANDARD_INFORMATION timestamps
+    if std_info is not None:
+        std_info_content = std_info.content
+        std_info_ti = std_info_content.timestamps.astimezone(args.timezone)
+        data["std_created"] = std_info_ti.created
+        data["std_changed"] = std_info_ti.changed
+        data["std_mft_change"] = std_info_ti.mft_changed
+        data["std_accessed"] = std_info_ti.accessed
+        #get STANDARD_INFORMATION related info
+        data["readonly"] = True if std_info_content.flags & libmft.flagsandtypes.FileInfoFlags.READ_ONLY else False
+        data["hidden"] = True if std_info_content.flags & libmft.flagsandtypes.FileInfoFlags.HIDDEN else False
+        data["system"] = True if std_info_content.flags & libmft.flagsandtypes.FileInfoFlags.SYSTEM else False
+        data["encrypted"] = True if std_info_content.flags & libmft.flagsandtypes.FileInfoFlags.ENCRYPTED else False
+    else:
+        data["std_created"] = data["std_changed"] = data["std_mft_change"] = \
+            data["std_accessed"] = data["readonly"] = data["hidden"] = data["system"] = \
+            data["encrypted"] = ""
+    #get FILENAME timestamps
+    if fn is not None:
+        fn_content = fn.content
+        fn_ti = fn_content.timestamps.astimezone(args.timezone)
+        data["fn_created"] = fn_ti.created
+        data["fn_changed"] = fn_ti.changed
+        data["fn_mft_change"] = fn_ti.mft_changed
+        data["fn_accessed"] = fn_ti.accessed
+        #get the full path
+        orphan, data["path"] = mft.get_full_path(fn)
+        #fix path if it is ads
+        if ds is None or ds.name is None:
+            data["is_ads"] = False
+        else:
+            data["path"] = ":".join((data["path"], ds.name))
+            data["is_ads"] = True
+    else:
+        data["fn_created"] = data["fn_changed"] = data["fn_mft_change"] = \
+            data["fn_accessed"] = ""
+        #if we have no filename attr, path cant be calculated
+        orphan = False
+        data["path"] = ""
+        data["is_ads"] = False
+
+    #if we have an orphan path, let's make it clear
+    if orphan:
+        data["path"] = "\\".join(("__ORPHAN__", data["path"]))
+    #get size from the datastream
+    if ds is not None:
+        data["size"] = ds.size
+        data["alloc_size"] = ds.alloc_size
+    else:
+        data["size"] = data["alloc_size"] = "0"
+
+    return data
+
+
+def iter_mft_data(mft, args, start, end):
+    for entry in mft.splice_generator(start, end):
+        #sometimes entries have no attributes and are marked as deleted, there is no information there
+        if not entry.attrs and entry.is_deleted:
+            continue
+        #other times, we might have a partial entry (entry that has been deleted,
+        #but occupied more than one entry) and not have the basic attribute information
+        #like STANDARD_INFORMATION or FILENAME, in these cases, ignore as well
+        if not entry.is_deleted and not entry.has_attribute(AttrTypes.STANDARD_INFORMATION):
+            continue
+
+        std_info = entry.get_attributes(AttrTypes.STANDARD_INFORMATION)[0]
+        fn_attrs = entry.get_unique_filename_attrs()
+        main_fn = entry.get_main_filename_attr()
+        ds_names = entry.get_datastream_names()
+        main_ds = entry.get_datastream()
+        #if the entry has no FILENAME attributes, build the default
+        if not fn_attrs:
+            fn_attrs = [None]
+            main_fn = None
+        # with the main filename found, let's find the ads and return
+        if ds_names is not None:
+            for ds_name in ds_names:
+                yield build_data_output(mft, entry, std_info, main_fn, entry.get_datastream(ds_name), args)
+        else:
+            yield build_data_output(mft, entry, std_info, main_fn, main_ds, args)
+        #iterate over the hardlinks
+        if main_fn:
+            for fn in fn_attrs:
+                if fn.content.parent_ref != main_fn.content.parent_ref: #if it is the same file name (which was printed)
+                    yield build_data_output(mft, entry, std_info, fn, main_ds, args)
+
+def worker(id, output_file, args, mft_config):
+
+    with open(args.input, "rb") as input_file:
+        mft = libmft.api.MFT(input_file, mft_config)
+        #calculate the offset that this process is going to work on
+        total, remainder = divmod(mft.total_amount_entries, args.n_cores)
+        start = id * total
+        end = (id + 1) * total if id != args.n_cores - 1 else ((id + 1) * total) + remainder
+        _MOD_LOGGER.debug("Proc %d - From %d to %d.", id, start, end)
+
+        #open the correct output and spit things out :D
+        with args.output_class(output_file, args) as output:
+            for data in iter_mft_data(mft, args, start, end):
+                output.write_data(data)
+
+    return output_file
+
+#------------------------------------------------------------------------------
+# MAIN SECTION
 #------------------------------------------------------------------------------
 def generate_name_file(id, output_name):
     #TODO use a better algorithm to get the names
@@ -289,43 +364,12 @@ def generate_name_file(id, output_name):
         else:
             v += 1
 
-def worker(id, temp_output_file, args, mft_config):
-
-    with open(args.input, "rb") as input_file:
-        mft = libmft.api.MFT(input_file, mft_config)
-        #calculate the offset that this process is going to work on
-        total, remainder = divmod(mft.total_amount_entries, args.n_cores)
-        start = id * total
-        end = (id + 1) * total if id != args.n_cores - 1 else ((id + 1) * total) + remainder
-        _MOD_LOGGER.debug("Proc %d - From %d to %d.", id, start, end)
-
-        if args.format == "csv":
-            output_csv(mft, args, temp_output_file, start, end)
-        elif args.format == "json":
-            output_json(mft, args, temp_output_file, start, end)
-        # elif args.format == "bodyfile":
-        #     output_bodyfile(mft, args)
-
-    return temp_output_file
-
 def merge_files(file_list, args):
-    global _CSV_COLUMN_ORDER
-
-    if args.format == "csv":
-        output_file = open(args.output, "w", encoding="utf-8", newline="")
-        writer = csv.DictWriter(output_file, fieldnames=_CSV_COLUMN_ORDER)
-        writer.writeheader()
-    elif args.format == "json":
-        output_file = open(args.output, "w")
-
-    #TODO try/except block
-    for file in file_list:
-        with open(file, "r", encoding="utf-8") as input_file:
-            shutil.copyfileobj(input_file, output_file)
-
-    output_file.close()
-
-
+    with args.output_class(args.output, args) as output_file:
+        output_file.execute_pre_merge()
+        for file in file_list:
+            with open(file, "r", encoding="utf-8") as input_file:
+                shutil.copyfileobj(input_file, output_file.fp)
 
 def remove_temp_files(file_list):
     _MOD_LOGGER.info(f"Removing intermediate files...")
@@ -334,10 +378,7 @@ def remove_temp_files(file_list):
             _MOD_LOGGER.debug("Removing file %s...", file)
             os.remove(file)
 
-def main():
-    _MOD_LOGGER.addHandler(logging.StreamHandler(sys.stderr))
-    args = get_arguments()
-
+def process_program_args(args):
     if args.verbose >= 1:
         _MOD_LOGGER.setLevel(level=logging.DEBUG)
     else:
@@ -352,13 +393,22 @@ def main():
         _MOD_LOGGER.error(f"Path provided '{args.input}' is not a file or does not exists.")
         sys.exit(1)
 
-    if os.path.exists(args.output):
-        _MOD_LOGGER.warning(f"The output file '{args.output}' exists and will be overwritten. You have 5 seconds to cancel the execution (CTRL+C).")
-        time.sleep(5)
-
     if args.n_cores == 0:
         #never use all the cores, leave one for the others
         args.n_cores = mp.cpu_count() - 1
+
+    if args.format == "csv":
+        args.output_class = OutputCSV
+    elif args.format == "json":
+        args.output_class = OutputJSON
+    elif args.format == "bodyfile":
+        args.output_class = OutputBodyFile
+
+def main():
+    _MOD_LOGGER.addHandler(logging.StreamHandler(sys.stderr))
+    args = get_arguments()
+
+    process_program_args(args)
 
     mft_config = libmft.api.MFTConfig()
     mft_config.load_dataruns = False
@@ -376,6 +426,9 @@ def main():
 
     _MOD_LOGGER.debug("Provided options: %s", args)
 
+    if os.path.exists(args.output):
+        _MOD_LOGGER.warning(f"The output file '{args.output}' exists and will be overwritten. You have 5 seconds to cancel the execution (CTRL+C).")
+        time.sleep(5)
 
     #TODO some kind of progress bar
     #TODO dump all resident files
@@ -406,7 +459,7 @@ def main():
             _MOD_LOGGER.error(str(e))
 
     end_time = time.time()
-    print(end_time - start_time)
+    _MOD_LOGGER.info(f"Execution time: {end_time - start_time}")
 
 
 if __name__ == '__main__':
